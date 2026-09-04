@@ -88,10 +88,12 @@ def write_archive(path, t, channels, rng, drop_frac=0.003, per_channel_times=Tru
     with tarfile.open(path, "w:gz") as tf:
         add_bytes(tf, "tandem.time", ts_text(t))
         for name, vals in channels.items():
-            keep = rng.random(len(t)) > drop_frac
+            keep = rng.random(len(vals)) > drop_frac
             add_bytes(tf, f"tandem.{name}", "\n".join(f"{v:.6f}" for v in vals[keep]) + "\n")
             if per_channel_times:
-                add_bytes(tf, f"tandem.{name}.time", ts_text(t[keep]))
+                # truncated files keep their original timestamps only when untruncated
+                tt = t[: len(vals)] if len(vals) != len(t) else t
+                add_bytes(tf, f"tandem.{name}.time", ts_text(tt[keep]))
 
 
 def main():
@@ -104,6 +106,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-per-channel-times", action="store_true",
                     help="write only tandem.time (exercises line-index alignment)")
+    ap.add_argument("--truncate", choices=["none", "start", "end"], default="none",
+                    help="drop lines from the START or END of every channel file "
+                         "(tandem.time stays full; exercises auto-alignment)")
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -114,6 +119,12 @@ def main():
         for month in range(1, args.months_per_year + 1):
             start = pd.Timestamp(year=year, month=month, day=1)
             t, channels = simulate_month(rng, start, args.magnet_coupling)
+            if args.truncate != "none":
+                k = int(rng.integers(2000, 8000))  # 5.5-22 h at 10 s sampling
+                if args.truncate == "start":
+                    channels = {name: v[k:] for name, v in channels.items()}
+                else:
+                    channels = {name: v[:-k] for name, v in channels.items()}
             name = f"tandem_archive_{year}-{month:02d}.tgz"
             write_archive(out / name, t, channels, rng, per_channel_times=not args.no_per_channel_times)
             n_written += 1

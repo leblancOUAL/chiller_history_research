@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .loader import inspect_archive
+from .loader import inspect_archive, diagnose_archive
 from . import pipeline
 from .report import print_report
 from .plots import make_plots
@@ -26,6 +26,9 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("inspect", help="List members of one archive (run first on a real file)")
+    p.add_argument("archive")
+
+    p = sub.add_parser("diagnose", help="Show line counts, coverage, and alignment decision for one archive")
     p.add_argument("archive")
 
     p = sub.add_parser("build", help="Read all archives and build the downsampled dataset")
@@ -48,11 +51,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
-        for name, size in sorted(inspect_archive(args.archive).items()):
-            print(f"{name:40s} {size / 1e6:9.2f} MB uncompressed")
+        for name, m in sorted(inspect_archive(args.archive).items()):
+            print(f"{name:40s} {m.size / 1e6:9.2f} MB uncompressed")
         print()
-        print("Check whether per-channel time files exist (e.g. tandem.Chiller_Current.time).")
-        print("The loader uses them when present; otherwise it aligns by line index.")
+        print("There is a single tandem.time per tarball (no per-channel time files).")
+        print("Run `diagnose` on one archive to see how the loader aligns the channels.")
+        return
+
+    if args.command == "diagnose":
+        diagnose_archive(args.archive)
         return
 
     if args.command == "build":

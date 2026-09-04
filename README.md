@@ -46,10 +46,21 @@ subcommand: `python -m chiller_analysis inspect <file>`.
 
     python -m chiller_analysis inspect data/tandem_archive_2020-05-01_0101.tgz
 
-This lists the members of one tarball. Check whether per-channel time files
-exist (e.g. `tandem.Chiller_Current.time`). The loader uses them when present
-and falls back to line-index alignment against `tandem.time` otherwise. If
-your member names differ, adjust `CHANNELS` / `_own_time_names()` in
+This lists the members of one tarball. The archives have a single
+`tandem.time` per tarball (no per-channel time files), so the loader:
+
+- zips channels by line index when counts match `tandem.time` exactly;
+- otherwise tries "start" vs "end" alignment and keeps the one where the
+  physics agrees (magnets on exactly when the terminal is up - the coherence
+  score is printed for both hypotheses).
+
+To see the line counts, time coverage, per-channel ranges, and the alignment
+decision for one archive:
+
+    python -m chiller_analysis diagnose data/tandem_archive_2020-05-01_0101.tgz
+
+Paste that output into the conversation if anything looks odd. If your member
+names differ from the expected four, adjust `CHANNELS` in
 `chiller_analysis/loader.py`.
 
 ## Run the full pipeline
