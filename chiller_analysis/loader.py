@@ -62,7 +62,8 @@ def _tokens(tf, members, basename):
 
 
 def _parse_times(tokens):
-    return pd.DatetimeIndex(pd.to_datetime(pd.Series(tokens), format=TS_FORMAT))
+    s = pd.to_datetime(pd.Series(tokens), format=TS_FORMAT, errors="coerce")
+    return pd.DatetimeIndex(s.dropna())
 
 
 def _own_time_names(basename):
