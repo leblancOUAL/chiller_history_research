@@ -29,14 +29,14 @@ out_dir = parse_args()
 def load(out_dir_str):
     out = Path(out_dir_str)
     minute = pd.read_parquet(out / "minutely.parquet")
-    levels = json.loads((out / "levels.json").read_text())
+    payload = json.loads((out / "levels.json").read_text())
     rep = {}
     if (out / "report.json").exists():
         rep = json.loads((out / "report.json").read_text())
-    return minute, levels, rep
+    return minute, payload, rep
 
 
-minute, levels, rep = load(str(out_dir))
+minute, payload, rep = load(str(out_dir))
 minute.index = pd.to_datetime(minute.index)
 
 st.title("Tandem chiller load analysis")
@@ -66,9 +66,8 @@ with tab1:
     xcol = v.columns[0]
     st.plotly_chart(px.line(v, x=xcol, y="chiller_kw", title="Chiller electrical power"), use_container_width=True)
     st.plotly_chart(px.line(v, x=xcol, y="accel_on_frac", title="Fraction of time accelerator is on"), use_container_width=True)
-    if rep:
-        st.write("Monthly summary:")
-        st.dataframe(pd.read_csv(out_dir / "monthly_summary.csv"))
+    st.write("Monthly summary:")
+    st.dataframe(pd.read_csv(out_dir / "monthly_summary.csv"))
 
 with tab2:
     parts = []
@@ -92,16 +91,20 @@ with tab2:
                  "spearman_magnet_chiller": rep.get("spearman_magnet_chiller")})
 
 with tab3:
-    if levels:
-        lv = pd.DataFrame(levels)
+    lv = pd.DataFrame(payload.get("nameplate_levels", []))
+    if not lv.empty:
+        st.caption(f"Nominal capacity: {payload.get('nominal_tons', float('nan')):.0f} tons")
         st.plotly_chart(
-            px.bar(lv, x="level_kw", y="fraction_of_time",
-                   title="Time spent at each chiller current level"),
+            px.bar(lv, x="tons", y="fraction_of_time", color="fans",
+                   hover_data=["compressors", "amps", "kw"],
+                   title="Time spent at each nameplate level"),
             use_container_width=True,
         )
         st.dataframe(lv)
+        st.subheader("Validation: detected levels vs nameplate")
+        st.dataframe(pd.DataFrame(payload.get("validation", [])))
     else:
-        st.info("No levels detected - run the full pipeline first.")
+        st.info("No levels found - run the full pipeline first.")
 
 with tab4:
     s = view.dropna(subset=["magnet_kw", "chiller_kw"])

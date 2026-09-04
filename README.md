@@ -5,9 +5,38 @@ Reads `tandem_archive_YYYY-*.tgz` files directly (no extraction to disk) and:
 1. Converts chiller leg current -> 3-phase electrical power -> approximate cooling load.
 2. Compares chiller load with the accelerator ON vs OFF (terminal > 0.25 MV),
    with effect sizes and bootstrap confidence intervals, not just p-values.
-3. Detects the chiller's discrete current levels (fans + 3 compressors) and
-   computes the duty cycle / fraction of time at each level.
+3. Computes the duty cycle against the chiller nameplate levels (every
+   combination of the 3 compressors +/- the 4 fans, mapped to nominal tons),
+   and cross-checks data-detected current levels against nameplate RLA.
 4. Produces static plots, a printed report, and an interactive Streamlit app.
+
+## Directory layout (important)
+
+`python -m chiller_analysis ...` only works if your files are arranged like
+this and you run the commands from the folder that CONTAINS the
+`chiller_analysis/` package directory:
+
+    chiller_history_research/
+    |-- chiller_analysis/          <- package: these 8 files must be together here
+    |   |-- __init__.py
+    |   |-- __main__.py
+    |   |-- loader.py
+    |   |-- physics.py
+    |   |-- pipeline.py
+    |   |-- plots.py
+    |   |-- report.py
+    |   |-- cli.py
+    |-- streamlit_app.py
+    |-- make_fake_data.py
+    |-- requirements.txt
+    |-- README.md
+    |-- data/                      <- put the tandem_archive_*.tgz files here
+
+If you get `No module named chiller_analysis`, either you are in the wrong
+directory (`cd` to the one containing `chiller_analysis/`) or the package
+files were flattened out of their folder. Note: `python -m inspect ...` runs
+Python's unrelated standard-library `inspect` module - the inspect here is a
+subcommand: `python -m chiller_analysis inspect <file>`.
 
 ## Install
 
@@ -15,22 +44,21 @@ Reads `tandem_archive_YYYY-*.tgz` files directly (no extraction to disk) and:
 
 ## First step: inspect a real archive
 
-    python -m chiller_analysis inspect /path/to/tandem_archive_2024-06.tgz
+    python -m chiller_analysis inspect data/tandem_archive_2020-05-01_0101.tgz
 
-This lists the members of one tarball. **Check whether per-channel time files
-exist** (e.g. `tandem.Chiller_Current.time`). The loader uses them when present
-and falls back to line-index alignment against `tandem.time` otherwise. If your
-files use different member names, adjust `CHANNELS` and `_own_time_names()` in
+This lists the members of one tarball. Check whether per-channel time files
+exist (e.g. `tandem.Chiller_Current.time`). The loader uses them when present
+and falls back to line-index alignment against `tandem.time` otherwise. If
+your member names differ, adjust `CHANNELS` / `_own_time_names()` in
 `chiller_analysis/loader.py`.
 
 ## Run the full pipeline
 
-    python -m chiller_analysis all --data-dir /data/tandem_archives --out chiller_out
+    python -m chiller_analysis all --data-dir data --out chiller_out
 
 Subcommands: `inspect`, `build`, `report`, `plots`, `all`.
 `build` reads every tarball twice: once to build the 1-minute dataset, once to
-get exact compressor-level occupancy. With ~2 GB of archives this takes minutes,
-not hours.
+get exact level occupancy. With a few GB of archives this takes minutes.
 
 Outputs in `chiller_out/`:
 
@@ -38,8 +66,9 @@ Outputs in `chiller_out/`:
   power columns (`chiller_kw`, `analyzer_kw`, `switcher_kw`, `magnet_kw`,
   `accel_on`, `accel_on_frac`)
 - `monthly_summary.csv` - per-month statistics
-- `levels.json` - detected chiller current levels and fraction-of-time occupancy
-- `report.json` + printed report - key numbers including the on/off comparison
+- `levels.json` - nameplate duty-cycle table, data-detected levels, validation
+- `report.json` + printed report - key numbers incl. the on/off comparison
+  and sizing guidance (capacity covering 95/99/100% of observed time)
 - `plots/*.png` - static figures
 
 ## Interactive exploration
@@ -53,33 +82,35 @@ Outputs in `chiller_out/`:
 
 ## Physics / assumptions
 
-Constants live at the top of `chiller_analysis/physics.py` - edit them there.
+Constants live at the top of `chiller_analysis/physics.py` - edit there.
 
 - Chiller power: P = sqrt(3) * 480 V * I_leg * pf, pf assumed 0.85 (balanced
   3-phase). pf uncertainty scales everything together and cancels in the
   on/off comparison.
+- Nameplate: 4 fans x 1.5 hp @ 3.5 FLA (= 14 A total); compressors
+  12.8 A RLA / 4 tons (5 hp), 21.2 A / 8 tons (10 hp), 37.8 A / 18 tons
+  (20 hp); nominal 30 tons. RLA is a conservative rating, so measured amps
+  typically land at or slightly below it - the report's validation section
+  quantifies exactly that.
 - Analyzer magnet: P = I^2 * 0.16 ohm; switcher magnet: P = I^2 * 0.20 ohm.
-- Accelerator ON: terminal voltage > 0.25 MV (negative terminal values are
-  clipped to 0 first).
+- Accelerator ON: terminal voltage > 0.25 MV (negatives clipped to 0 first).
 - Cooling estimate: electrical kW * COP (assumed 3.0); tons = kW_cooling / 3.517.
-- Compressor duty cycle: the chiller current is a step signal; levels are found
-  by peak detection on the current histogram. Effective stage fraction =
-  (I - I_idle) / (I_full - I_idle), clipped to [0, 1].
+  With the nameplate tons known, the duty-cycle table reports nominal tons
+  directly and COP is only needed for the kW<->tons cross-check.
 - Timestamps are parsed as dd/mm/yyyy-HH:MM:SS, naive lab time (no timezone).
 
-## Interpreting the on/off comparison
+## Interpreting the results
 
 With a decade of 1-minute data, any real difference will be "statistically
 significant" - the engineering question is magnitude. Look at:
 
 - `median_diff_kw` and its bootstrap 95% CI (does the CI include ~0?),
 - mean compressor stage fraction on vs off,
-- Spearman correlation between magnet I^2*R power and chiller power.
+- Spearman correlation between magnet I^2*R power and chiller power,
+- the duty-cycle table: if the chiller rarely leaves the low stages, the
+  accelerator contributes little to the load.
 
-If all three are near zero, the data support "chiller load is independent of
-accelerator operation" - exactly the evidence you want for sizing.
-
-For sizing the replacement: use p99/p99.9/max electrical demand converted at
-your chosen COP, then add margin for ambient extremes, aging, and future load
-growth. This tool characterizes the historical load; an HVAC engineer should
-confirm the final equipment selection.
+For sizing the replacement: the report lists the capacity (in tons, at the
+nameplate level structure) that covers 95%, 99%, and 100% of observed time.
+Add margin for ambient extremes, aging, and future load growth; an HVAC
+engineer should confirm the final selection.

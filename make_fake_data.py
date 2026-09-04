@@ -1,9 +1,10 @@
 # Generate synthetic tandem_archive_*.tgz files for testing the pipeline.
 #
-# The synthetic chiller has an idle current of ~4 A (fans) plus up to three
-# compressors drawing ~16, 27 and 41 A. A latent cooling load with a daily
-# cycle and an accelerator-dependent term drives compressor staging with
-# hysteresis, so the on/off comparison should recover the coupling you inject.
+# Uses the real chiller nameplate numbers so the nameplate validation in the
+# report should show small diffs: 4 fans x 3.5 FLA = 14 A idle, compressors
+# 12.8 A (5 hp, 4 t), 21.2 A (10 hp, 8 t), 37.8 A (20 hp, 18 t).
+# A latent cooling load with a daily cycle and an accelerator-dependent term
+# drives compressor staging with hysteresis.
 
 import argparse
 import io
@@ -13,9 +14,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-CHILLER_IDLE_A = 4.0
-COMPRESSOR_A = np.array([16.0, 27.0, 41.0])
-STAGE_LOAD = np.array([0.0, 0.35, 0.65, 1.0])  # load index each stage handles
+FANS_A = 14.0                                  # 4 fans x 3.5 FLA
+COMPRESSOR_A = np.array([12.8, 21.2, 37.8])    # RLA: 5, 10, 20 hp
+COMPRESSOR_TONS = np.array([4.0, 8.0, 18.0])
+# stage k = first k compressors running; stage up/down load thresholds
+STAGE_UP = np.array([0.20, 0.55, 0.85])     # add 5hp, 10hp, 20hp above these
+STAGE_DOWN = np.array([0.05, 0.35, 0.65])   # drop the largest stage below these
 DT_SECONDS = 10
 
 
@@ -42,23 +46,23 @@ def simulate_month(rng, start, magnet_coupling):
     switcher = np.clip(np.where(accel_on, rng.uniform(15, 60, n), 0.0) + rng.normal(0, 0.4, n), 0, None)
     magnet_kw = analyzer**2 * 0.16 / 1000.0 + switcher**2 * 0.20 / 1000.0
 
-    # latent cooling load: daily cycle + noise + magnet heat term
+    # latent cooling load index (roughly 0..1.5), daily cycle + magnet heat
     load = (
         0.45
         + 0.18 * np.sin((hour - 14.0) / 24.0 * 2 * np.pi)
         + rng.normal(0, 0.06, n)
         + magnet_coupling * magnet_kw / 4.0
     )
-    load = np.clip(load, 0.05, 1.5)
+    load = np.clip(load, 0.0, 1.5)
 
     chiller = np.empty(n)
     stage = 0
     for k in range(n):
-        if stage < 3 and load[k] > STAGE_LOAD[stage] + 0.18:
+        if stage < 3 and load[k] > STAGE_UP[stage]:
             stage += 1
-        elif stage > 0 and load[k] < STAGE_LOAD[stage] - 0.18:
+        elif stage > 0 and load[k] < STAGE_DOWN[stage - 1]:
             stage -= 1
-        chiller[k] = CHILLER_IDLE_A + COMPRESSOR_A[:stage].sum() + (2.0 if load[k] > 0.75 else 0.0)
+        chiller[k] = FANS_A + COMPRESSOR_A[:stage].sum()
     chiller += rng.normal(0, 0.25, n)
 
     return t, {
