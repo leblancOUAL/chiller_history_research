@@ -65,6 +65,12 @@ names differ from the expected four, adjust `CHANNELS` in
 
 ## Run the full pipeline
 
+Note: the filename date of an archive is its CREATION date - the tarball
+named tandem_archive_2020-05-01_0101.tgz contains April 2020 data. All
+statistics use the timestamps inside tandem.time, so this is cosmetic, but
+don't be surprised that filename month != content month.
+
+
     python -m chiller_analysis all --data-dir data --out chiller_out
 
 Subcommands: `inspect`, `build`, `report`, `plots`, `all`.
@@ -104,6 +110,11 @@ Constants live at the top of `chiller_analysis/physics.py` - edit there.
   typically land at or slightly below it - the report's validation section
   quantifies exactly that.
 - Analyzer magnet: P = I^2 * 0.16 ohm; switcher magnet: P = I^2 * 0.20 ohm.
+  Channel line counts can differ from tandem.time by a few lines (archiver
+  edge truncation); a 20-line difference is ~10 minutes out of a month, so
+  the loader aligns directly and notes it. Units are amps, confirmed against
+  a running month (April 2022: analyzer max 256 A, switcher max 17.9 A,
+  terminal 1.85 MV).
 - Accelerator ON: terminal voltage > 0.25 MV (negatives clipped to 0 first).
 - Cooling estimate: electrical kW * COP (assumed 3.0); tons = kW_cooling / 3.517.
   With the nameplate tons known, the duty-cycle table reports nominal tons

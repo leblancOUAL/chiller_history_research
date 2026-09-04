@@ -78,6 +78,7 @@ def build(data_dir, out_dir, start_year=2011, resample="1min", seed=0):
     for c in minute.columns:
         if c != "accel_on":
             minute[c] = minute[c].astype("float32")
+
     save_table(minute, out_dir / "minutely")
     print(f"combined: {len(minute)} bins, {minute.index[0]} -> {minute.index[-1]}")
 
