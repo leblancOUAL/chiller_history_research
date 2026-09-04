@@ -118,17 +118,36 @@ def _coherence_score(frame):
     return hits / starts.size
 
 
+def _count_tolerance(master_n):
+    # A few missing lines at an archiver edge are immaterial (20 lines is
+    # ~10 minutes out of a month of ~70k samples), so treat near-matches as
+    # exact and zip directly instead of guessing start vs end.
+    return max(10, int(0.001 * master_n))
+
+
 def _joint_align(master, raw, quiet=False, where=""):
     """Align {col: values} to master with a single tandem.time file.
 
-    If counts match the master exactly, zip by index. Otherwise compare the
-    "start" and "end" hypotheses with the coherence score and keep the winner.
+    If counts match the master exactly (or within a few lines), zip by index.
+    Only for grossly unequal counts does it compare the "start" and "end"
+    hypotheses with the coherence score and keep the winner.
     """
     counts = {c: len(v) for c, v in raw.items()}
     if not raw:
         return pd.DataFrame(index=master)
-    if all(n == len(master) for n in counts.values()):
-        return pd.DataFrame({c: pd.Series(v, index=master) for c, v in raw.items()})
+    tol = _count_tolerance(len(master))
+    if (
+        all(abs(n - len(master)) <= tol for n in counts.values())
+        and max(counts.values()) - min(counts.values()) <= tol
+    ):
+        n = min(min(counts.values()), len(master))
+        if not quiet and len(set(counts.values())) > 1:
+            print(
+                f"  {where}: line counts {dict(counts)} vs {len(master)} timestamps "
+                f"(within {tol}) - direct alignment"
+            )
+        idx = master[:n]
+        return pd.DataFrame({c: pd.Series(v[:n], index=idx) for c, v in raw.items()})
 
     n = min([len(master)] + list(counts.values()))
     scores = {}
@@ -198,6 +217,12 @@ def load_archive(path, align_tolerance=ALIGN_TOLERANCE, only=None, quiet=False):
         return df
 
 
+def _fmt_delta(td):
+    """Timedelta -> '38.4 s' or '9.3 min' (no days)."""
+    s = float(pd.Timedelta(td).total_seconds())
+    return f"{s:.1f} s" if s < 120 else f"{s / 60:.1f} min"
+
+
 def diagnose_archive(path, basenames=None):
     """Print line counts, time coverage, per-channel stats, and the alignment
     decision for one tarball - run this on a real file and paste the output."""
@@ -209,7 +234,10 @@ def diagnose_archive(path, basenames=None):
         dts = master.to_series().diff().dropna()
         print(f"tandem.time: {len(master)} timestamps, {master[0]} -> {master[-1]}")
         if len(dts):
-            print(f"  median spacing: {dts.median()}, min: {dts.min()}, max: {dts.max()}")
+            print(
+                f"  median spacing: {_fmt_delta(dts.median())} "
+                f"(min {_fmt_delta(dts.min())}, max {_fmt_delta(dts.max())})"
+            )
         raw = {}
         for basename in basenames:
             if basename not in members:
@@ -225,8 +253,12 @@ def diagnose_archive(path, basenames=None):
             )
         print()
         counts = {c: len(v) for c, v in raw.items()}
-        if counts and all(n == len(master) for n in counts.values()):
-            print("all channels match tandem.time length - direct index alignment")
+        tol = _count_tolerance(len(master))
+        if counts and all(abs(n - len(master)) <= tol for n in counts.values()):
+            print(
+                f"line counts within {tol} of tandem.time ({dict(counts)}) - "
+                f"direct index alignment; edge truncation is negligible"
+            )
         else:
             n = min([len(master)] + list(counts.values())) if counts else 0
             for mode in ("start", "end"):
