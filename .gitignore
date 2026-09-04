@@ -12,3 +12,4 @@ chiller_out/
 venv/
 .vscode/
 .idea/
+*:Zone.Identifier
