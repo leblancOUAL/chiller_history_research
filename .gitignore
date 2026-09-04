@@ -1,3 +1,14 @@
-data/
-chiller_analysis/__pycache__/*
+# Byte-compiled / optimized / DLL files
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Data directories
+data/
+chiller_out/
+
+# Environments & IDEs
+.venv/
+venv/
+.vscode/
+.idea/
