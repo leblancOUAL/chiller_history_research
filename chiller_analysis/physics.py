@@ -6,6 +6,7 @@
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
+from scipy.stats import gaussian_kde
 
 V_LL = 480.0                 # 3-phase line-to-line voltage at the disconnect
 POWER_FACTOR = 0.85          # assumed motor power factor (cancels in on/off comparisons)
