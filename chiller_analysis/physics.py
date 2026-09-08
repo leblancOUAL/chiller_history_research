@@ -60,33 +60,39 @@ def derive_features(df):
     return out
 
 
-def discover_empirical_stages(chiller_amps_array, min_peak_distance_amps=3.0):
+def discover_empirical_stages(chiller_amps_array, min_peak_distance_amps=2.0):
     """
-    Identifies true operating current clusters (KDE density peaks) from 
-    chiller_a telemetry to map real compressor + fan staging modes.
+    Histogram-based mode detection using logarithmic density scaling to catch
+    both steady-state stages and short high-current pulses (e.g. 57 A).
     """
     clean_amps = np.asarray(chiller_amps_array, dtype=float)
-    clean_amps = clean_amps[np.isfinite(clean_amps) & (clean_amps > 1.0)]
+    clean_amps = clean_amps[np.isfinite(clean_amps) & (clean_amps > 0.5)]
 
     if clean_amps.size < 100:
         return []
 
-    amp_grid = np.linspace(0, max(clean_amps.max() + 5.0, 100.0), 1000)
-    kde = gaussian_kde(clean_amps, bw_method=0.04)
-    density = kde(amp_grid)
+    # Bin into 0.5 A steps from 0 to 100 A
+    bins = np.arange(0, 100.5, 0.5)
+    counts, bin_edges = np.histogram(clean_amps, bins=bins)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
-    bin_width = amp_grid[1] - amp_grid[0]
-    distance_bins = max(int(min_peak_distance_amps / bin_width), 1)
-    
-    peaks, _ = find_peaks(density, distance=distance_bins, prominence=max(density) * 0.03)
-    
+    # Smooth histogram across a 2.5 A window
+    kernel = np.array([0.05, 0.25, 0.4, 0.25, 0.05])
+    smoothed = np.convolve(counts, kernel, mode="same")
+
+    # Logarithmic scaling preserves short-duration high-load spikes
+    log_counts = np.log1p(smoothed)
+    distance_bins = max(int(min_peak_distance_amps / 0.5), 1)
+
+    peaks, _ = find_peaks(log_counts, distance=distance_bins, prominence=0.4, height=np.log1p(5))
+
     discovered_modes = []
     for p in peaks:
-        amp_val = round(float(amp_grid[p]), 2)
+        amp_val = round(float(bin_centers[p]), 1)
         discovered_modes.append({
             "peak_amps": amp_val,
             "estimated_kw": round(float(chiller_power_kw(amp_val)), 2),
-            "probable_equipment": interpret_amps(amp_val)
+            "probable_equipment": interpret_amps(amp_val),
         })
 
     return discovered_modes
@@ -97,29 +103,31 @@ def interpret_amps(amps):
     if amps < 3.0:
         return "Idle / Off"
     if 3.0 <= amps < 15.0:
-        n_fans = round(amps / FAN_FLA_EACH_A)
+        n_fans = max(1, min(4, round(amps / FAN_FLA_EACH_A)))
         return f"Fans only ({n_fans} fan{'s' if n_fans > 1 else ''})"
-    
-    # Sequential Stage 1 (5 hp = 12.8 A + 0-4 fans)
+
+    # Stage 1 (5 hp = 12.8 A + fans)
     if 15.0 <= amps < 32.0:
-        fan_amps = amps - 12.8
+        fan_amps = max(0.0, amps - 12.8)
         n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
         return f"Stage 1 (5 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
-    
-    # Sequential Stage 2 (5 hp + 10 hp = 34.0 A + 0-4 fans)
-    if 32.0 <= amps < 54.0:
-        fan_amps = amps - 34.0
+
+    # Stage 2 (5 hp + 10 hp = 34.0 A + fans)
+    if 32.0 <= amps < 50.0:
+        fan_amps = max(0.0, amps - 34.0)
         n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
         return f"Stage 2 (5+10 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
 
-    # Sequential Stage 3 (5 hp + 10 hp + 20 hp = 71.8 A + 0-4 fans)
-    if 70.0 <= amps < 95.0:
-        fan_amps = amps - 71.8
+    # Single 20 hp compressor operation (5 hp & 10 hp offline/bypassed)
+    if 50.0 <= amps < 68.0:
+        fan_amps = max(0.0, amps - 37.8)
         n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
-        return f"Stage 3 (5+10+20 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
+        return f"20 hp Solo / Stage 3 Active (5hp/10hp offline + {n_fans} fans)"
 
-    # Anomaly / Unclassified
-    if 54.0 <= amps < 70.0:
-        return "Unusual mode (Possible 20 hp running without 10 hp)"
+    # Full Stage 3 (5 hp + 10 hp + 20 hp = 71.8 A + fans)
+    if 68.0 <= amps < 95.0:
+        fan_amps = max(0.0, amps - 71.8)
+        n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
+        return f"Full Stage 3 (5+10+20 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
 
     return "High load / Over-current"
