@@ -1,6 +1,7 @@
 # Pipeline: read archives -> per-minute dataset -> summaries and statistics.
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -49,9 +50,38 @@ def resample_feats(feat, rule):
     return out
 
 
-def build(data_dir, out_dir, start_year=2011, resample="1min", seed=0):
+def _get_cached_archive(path, cache_dir, quiet=False):
+    """Loads an archive from Parquet/Pickle cache if it exists, otherwise parses it."""
+    path = Path(path)
+    cache_dir = Path(cache_dir)
+    pq = cache_dir / f"{path.stem}.parquet"
+    pkl = cache_dir / f"{path.stem}.pkl"
+    
+    if pq.exists():
+        return pd.read_parquet(pq)
+    if pkl.exists():
+        return pd.read_pickle(pkl)
+        
+    df = load_archive(path, quiet=quiet)
+    
+    # Save parsed df to cache for future runs
+    if not df.empty:
+        try:
+            df.to_parquet(pq)
+        except (ImportError, ValueError):
+            df.to_pickle(pkl)
+    return df
+
+
+def build(data_dir, out_dir, start_year=2011, resample="1min", seed=0, clear_cache=False):
     """Process every archive; returns (minutely DataFrame, levels payload dict)."""
     out_dir = Path(out_dir)
+    
+    cache_dir = out_dir / "cache"
+    if clear_cache and cache_dir.exists():
+        shutil.rmtree(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
     out_dir.mkdir(parents=True, exist_ok=True)
     archives = find_archives(data_dir, start_year)
     if not archives:
@@ -62,7 +92,8 @@ def build(data_dir, out_dir, start_year=2011, resample="1min", seed=0):
     minute_frames = []
     chiller_samples = []
     for k, path in enumerate(archives, 1):
-        feat = derive_features(load_archive(path)).dropna(subset=REQUIRED)
+        raw_df = _get_cached_archive(path, cache_dir)
+        feat = derive_features(raw_df).dropna(subset=REQUIRED)
         if feat.empty:
             print(f"[{k}/{len(archives)}] {path.name}: no matched rows, skipping")
             continue
@@ -98,7 +129,8 @@ def build(data_dir, out_dir, start_year=2011, resample="1min", seed=0):
     counts_det = np.zeros(max(det_amps.size, 1), dtype=np.int64)
     total = 0
     for path in archives:
-        i = load_archive(path, only=("chiller_a",), quiet=True)["chiller_a"].dropna().to_numpy()
+        df = _get_cached_archive(path, cache_dir, quiet=True)
+        i = df["chiller_a"].dropna().to_numpy() if "chiller_a" in df.columns else np.array([])
         counts_np += nearest_level_counts(i, np_amps)
         if det_amps.size:
             counts_det += nearest_level_counts(i, det_amps)

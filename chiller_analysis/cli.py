@@ -36,6 +36,7 @@ def main(argv=None):
     p.add_argument("--out", default="chiller_out")
     p.add_argument("--start-year", type=int, default=2011)
     p.add_argument("--resample", default="1min", help="pandas offset string, default 1min")
+    p.add_argument("--clear-cache", action="store_true", help="Clear the archive cache before building")
 
     p = sub.add_parser("report", help="Print the summary report (build first)")
     p.add_argument("--out", default="chiller_out")
@@ -47,6 +48,7 @@ def main(argv=None):
     p.add_argument("--data-dir", required=True)
     p.add_argument("--out", default="chiller_out")
     p.add_argument("--start-year", type=int, default=2011)
+    p.add_argument("--clear-cache", action="store_true", help="Clear the archive cache before building")
 
     args = parser.parse_args(argv)
 
@@ -63,7 +65,7 @@ def main(argv=None):
         return
 
     if args.command == "build":
-        pipeline.build(args.data_dir, args.out, args.start_year, args.resample)
+        pipeline.build(args.data_dir, args.out, args.start_year, args.resample, clear_cache=args.clear_cache)
         return
 
     if args.command in ("report", "plots"):
@@ -80,7 +82,7 @@ def main(argv=None):
         return
 
     if args.command == "all":
-        minute, payload = pipeline.build(args.data_dir, args.out, args.start_year)
+        minute, payload = pipeline.build(args.data_dir, args.out, args.start_year, clear_cache=args.clear_cache)
         summary = pipeline.monthly_summary(minute)
         summary.to_csv(Path(args.out) / "monthly_summary.csv", index=False)
         stats = pipeline.compute_stats(minute, payload)
