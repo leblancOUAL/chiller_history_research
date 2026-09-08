@@ -59,43 +59,66 @@ def derive_features(df):
     return out
 
 
-# ---- Chiller levels --------------------------------------------------------
-# With no VFDs the current is a step signal. The expected levels are every
-# subset of compressors (by RLA), with and without the fan load.
+def discover_empirical_stages(chiller_amps_array, min_peak_distance_amps=3.0):
+    """
+    Identifies true operating current clusters (KDE density peaks) from 
+    chiller_a telemetry to map real compressor + fan staging modes.
+    """
+    clean_amps = np.asarray(chiller_amps_array, dtype=float)
+    clean_amps = clean_amps[np.isfinite(clean_amps) & (clean_amps > 1.0)]
 
-def nameplate_levels():
-    """Returns sequential Watlow stage expectations."""
-    rows = []
-    for s in WATLOW_STAGES:
-        rows.append({
-            "stage": s["stage"],
-            "compressors": s["compressors"],
-            "fans": s["fans"],
-            "amps": s["amps"],
-            "kw": round(float(chiller_power_kw(s["amps"])), 2),
-            "tons": s["tons"],
+    if clean_amps.size < 100:
+        return []
+
+    amp_grid = np.linspace(0, max(clean_amps.max() + 5.0, 100.0), 1000)
+    kde = gaussian_kde(clean_amps, bw_method=0.04)
+    density = kde(amp_grid)
+
+    bin_width = amp_grid[1] - amp_grid[0]
+    distance_bins = max(int(min_peak_distance_amps / bin_width), 1)
+    
+    peaks, _ = find_peaks(density, distance=distance_bins, prominence=max(density) * 0.03)
+    
+    discovered_modes = []
+    for p in peaks:
+        amp_val = round(float(amp_grid[p]), 2)
+        discovered_modes.append({
+            "peak_amps": amp_val,
+            "estimated_kw": round(float(chiller_power_kw(amp_val)), 2),
+            "probable_equipment": interpret_amps(amp_val)
         })
-    return rows
+
+    return discovered_modes
 
 
-def classify_operating_state(amps_series):
-    """
-    Classifies currents into:
-      - Sequential Watlow Stages (0, 1, 2, 3)
-      - Out-of-Order / Malfunctioning states (e.g. 10hp or 20hp running without 5hp)
-    """
-    a = np.asarray(amps_series, dtype=float)
-    out = np.full(a.shape, "Unknown", dtype=object)
+def interpret_amps(amps):
+    """Maps an empirical current peak to physical compressor and fan states."""
+    if amps < 3.0:
+        return "Idle / Off"
+    if 3.0 <= amps < 15.0:
+        n_fans = round(amps / FAN_FLA_EACH_A)
+        return f"Fans only ({n_fans} fan{'s' if n_fans > 1 else ''})"
+    
+    # Sequential Stage 1 (5 hp = 12.8 A + 0-4 fans)
+    if 15.0 <= amps < 32.0:
+        fan_amps = amps - 12.8
+        n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
+        return f"Stage 1 (5 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
+    
+    # Sequential Stage 2 (5 hp + 10 hp = 34.0 A + 0-4 fans)
+    if 32.0 <= amps < 54.0:
+        fan_amps = amps - 34.0
+        n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
+        return f"Stage 2 (5+10 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
 
-    # Thresholds around expected sequential stages (+/- 3.5 A)
-    out[a < 5.0] = "Stage 0 (Off)"
-    out[(a >= 23.0) & (a <= 31.0)] = "Stage 1 (5hp)"
-    out[(a >= 44.0) & (a <= 52.0)] = "Stage 2 (5+10hp)"
-    out[(a >= 81.0) & (a <= 91.0)] = "Stage 3 (5+10+20hp)"
+    # Sequential Stage 3 (5 hp + 10 hp + 20 hp = 71.8 A + 0-4 fans)
+    if 70.0 <= amps < 95.0:
+        fan_amps = amps - 71.8
+        n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
+        return f"Stage 3 (5+10+20 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
 
-    # Malfunctions / Out-of-order combinations
-    out[(a >= 33.0) & (a <= 39.0)] = "Malfunction: 10hp only"
-    out[(a >= 50.0) & (a <= 56.0)] = "Malfunction: 20hp only"
-    out[(a >= 71.0) & (a <= 77.0)] = "Malfunction: 10+20hp (5hp down)"
+    # Anomaly / Unclassified
+    if 54.0 <= amps < 70.0:
+        return "Unusual mode (Possible 20 hp running without 10 hp)"
 
-    return out
+    return "High load / Over-current"
