@@ -67,7 +67,10 @@ with tab1:
     st.plotly_chart(px.line(v, x=xcol, y="chiller_kw", title="Chiller electrical power"), use_container_width=True)
     st.plotly_chart(px.line(v, x=xcol, y="accel_on_frac", title="Fraction of time accelerator is on"), use_container_width=True)
     st.write("Monthly summary:")
-    st.dataframe(pd.read_csv(out_dir / "monthly_summary.csv"))
+    summary_csv = out_dir / "monthly_summary.csv"
+    if summary_csv.exists():
+        st.write("Monthly summary:")
+        st.dataframe(pd.read_csv(summary_csv))
 
 with tab2:
     parts = []
@@ -91,18 +94,32 @@ with tab2:
                  "spearman_magnet_chiller": rep.get("spearman_magnet_chiller")})
 
 with tab3:
-    lv = pd.DataFrame(payload.get("nameplate_levels", []))
+    stages = payload.get("discovered_empirical_stages", payload.get("nameplate_levels", []))
+    lv = pd.DataFrame(stages)
+    
     if not lv.empty:
         st.caption(f"Nominal capacity: {payload.get('nominal_tons', float('nan')):.0f} tons")
+        
+        # Check column availability before plotting bar chart
+        x_col = "estimated_kw" if "estimated_kw" in lv.columns else ("tons" if "tons" in lv.columns else lv.columns[0])
+        y_col = "peak_amps" if "peak_amps" in lv.columns else "fraction_of_time"
+        
         st.plotly_chart(
-            px.bar(lv, x="tons", y="fraction_of_time", color="fans",
-                   hover_data=["compressors", "amps", "kw"],
-                   title="Time spent at each nameplate level"),
+            px.bar(
+                lv, 
+                x=x_col, 
+                y=y_col, 
+                hover_data=list(lv.columns),
+                title="Empirically Discovered Operating Stages"
+            ),
             use_container_width=True,
         )
+        st.subheader("Discovered Operating Modes")
         st.dataframe(lv)
-        st.subheader("Validation: detected levels vs nameplate")
-        st.dataframe(pd.DataFrame(payload.get("validation", [])))
+        
+        if "short_cycling_analysis" in payload:
+            st.subheader("Short-Cycling Analysis")
+            st.json(payload["short_cycling_analysis"])
     else:
         st.info("No levels found - run the full pipeline first.")
 
