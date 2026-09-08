@@ -25,39 +25,39 @@ def main(argv=None):
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("inspect", help="List members of one archive (run first on a real file)")
+    p = sub.add_parser("inspect", help="List members of one archive")
     p.add_argument("archive")
 
-    p = sub.add_parser("diagnose", help="Show line counts, coverage, and alignment decision for one archive")
+    p = sub.add_parser("diagnose", help="Show line counts and alignment for one archive")
     p.add_argument("archive")
 
     p = sub.add_parser("build", help="Read all archives and build the downsampled dataset")
     p.add_argument("--data-dir", required=True)
     p.add_argument("--out", default="chiller_out")
     p.add_argument("--start-year", type=int, default=2011)
-    p.add_argument("--resample", default="1min", help="pandas offset string, default 1min")
-    p.add_argument("--clear-cache", action="store_true", help="Clear the archive cache before building")
+    p.add_argument("--resample", default="1min")
+    p.add_argument("--clear-cache", action="store_true")
 
-    p = sub.add_parser("report", help="Print the summary report (build first)")
+    p = sub.add_parser("stages", help="Print empirically discovered chiller operating stages")
     p.add_argument("--out", default="chiller_out")
 
-    p = sub.add_parser("plots", help="Write static PNG plots (build first)")
+    p = sub.add_parser("report", help="Print the summary report")
+    p.add_argument("--out", default="chiller_out")
+
+    p = sub.add_parser("plots", help="Write static PNG plots")
     p.add_argument("--out", default="chiller_out")
 
     p = sub.add_parser("all", help="build + report + plots")
     p.add_argument("--data-dir", required=True)
     p.add_argument("--out", default="chiller_out")
     p.add_argument("--start-year", type=int, default=2011)
-    p.add_argument("--clear-cache", action="store_true", help="Clear the archive cache before building")
+    p.add_argument("--clear-cache", action="store_true")
 
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
         for name, m in sorted(inspect_archive(args.archive).items()):
             print(f"{name:40s} {m.size / 1e6:9.2f} MB uncompressed")
-        print()
-        print("There is a single tandem.time per tarball (no per-channel time files).")
-        print("Run `diagnose` on one archive to see how the loader aligns the channels.")
         return
 
     if args.command == "diagnose":
@@ -66,6 +66,19 @@ def main(argv=None):
 
     if args.command == "build":
         pipeline.build(args.data_dir, args.out, args.start_year, args.resample, clear_cache=args.clear_cache)
+        print(f"\nBuild complete. Output written to {args.out}/")
+        return
+
+    if args.command == "stages":
+        levels_file = Path(args.out) / "levels.json"
+        if not levels_file.exists():
+            print(f"Error: {levels_file} not found. Run `build` command first.")
+            return
+        payload = json.loads(levels_file.read_text())
+        print("\n=== Empirically Discovered Operating Modes ===")
+        for mode in payload.get("discovered_empirical_stages", []):
+            print(f"  • {mode['peak_amps']:5.1f} A ({mode['estimated_kw']:5.1f} kW) -> {mode['probable_equipment']}")
+        print()
         return
 
     if args.command in ("report", "plots"):
@@ -90,8 +103,6 @@ def main(argv=None):
         print_report(stats)
         plot_dir = make_plots(minute, summary, payload, args.out)
         print(f"\nWrote plots to {plot_dir}")
-        print(f"\nNext: interactive exploration with")
-        print(f"  streamlit run streamlit_app.py -- {args.out}")
 
 
 if __name__ == "__main__":
