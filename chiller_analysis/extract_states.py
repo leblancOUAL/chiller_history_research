@@ -85,12 +85,12 @@ def extract_current_plateaus(minutely_path, min_amp_threshold=2.7, delta_thresho
     return pd.DataFrame(events)
 
 
-def summarize_distinct_levels(events_df, level_bin_width=1.5):
-    """Groups extracted plateaus into distinct current buckets based on 1.5 A steps."""
+def summarize_distinct_levels(events_df, level_bin_width=2.2):
+    """Groups extracted plateaus into distinct current buckets based on 2.2 A steps."""
     if events_df.empty:
         return pd.DataFrame()
         
-    # Bin mean amps into 1.5 A steps
+    # Bin mean amps into 2.2 A steps
     events_df["amp_bucket"] = (events_df["mean_amps"] // level_bin_width) * level_bin_width
     
     summary = events_df.groupby("amp_bucket").agg(
@@ -114,7 +114,7 @@ if __name__ == "__main__":
     print(f"\nExtracted {len(events):,} continuous active state plateaus (> 2.7 A).")
     
     summary = summarize_distinct_levels(events)
-    print("\n=== Discovered Distinct Operating Levels (Grouped by ~1.5 A steps) ===")
+    print("\n=== Discovered Distinct Operating Levels (Grouped by ~2.2 A steps) ===")
     print(summary.to_string(index=False))
     
     # Save output for inspection
