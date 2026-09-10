@@ -33,6 +33,7 @@ CHANNELS = {
     "tandem.Chiller_Current": "chiller_a",
     "tandem.switcher": "switcher_a",
     "tandem.terminal": "terminal_mv",
+    "tandem.water": "water_temp_c",  # Added chilled water temperature
 }
 SENSOR_CHANNELS = {k: v for k, v in CHANNELS.items() if k != "tandem.time"}
 
@@ -269,3 +270,4 @@ def diagnose_archive(path, basenames=None):
                     for c, v in raw.items()
                 }
                 print(f"coherence ({mode:5s}): {_coherence_score(frame):.3f}")
+                

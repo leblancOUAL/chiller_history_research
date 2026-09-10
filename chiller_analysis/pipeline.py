@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import requests
 from pathlib import Path
 
 import numpy as np
@@ -95,6 +96,57 @@ def analyze_cycles(minute_df, idle_amp_threshold=15.0):
     return stats, cycles_df
 
 
+def fetch_ambient_temperature(df):
+    """
+    Fetches historical hourly temperature data from Open-Meteo for Athens, OH,
+    and interpolates it to the minute-level dataframe index.
+    """
+    if df.empty:
+        return df
+        
+    # Coordinates for Athens, OH
+    lat = 39.3292
+    lon = -82.1013
+    
+    start_date = df.index.min().strftime('%Y-%m-%d')
+    # Open-Meteo archive requires end date to be up to 1-2 days ago
+    end_date = df.index.max().strftime('%Y-%m-%d')
+    
+    url = (
+        f"https://archive-api.open-meteo.com/v1/archive"
+        f"?latitude={lat}&longitude={lon}"
+        f"&start_date={start_date}&end_date={end_date}"
+        f"&hourly=temperature_2m"
+        f"&timezone=America%2FNew_York"
+    )
+    
+    print(f"Fetching ambient temperature data from Open-Meteo for {start_date} to {end_date}...")
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Create a dataframe from the hourly weather data
+        weather_df = pd.DataFrame({
+            "time": pd.to_datetime(data["hourly"]["time"]),
+            "ambient_temp_c": data["hourly"]["temperature_2m"]
+        }).set_index("time")
+        
+        # Strip timezone awareness to match naive lab time index
+        weather_df.index = weather_df.index.tz_localize(None)
+        
+        print("Merging and interpolating weather data...")
+        df = df.join(weather_df, how="left")
+        # Interpolate the hourly temperatures down to minute resolution
+        df["ambient_temp_c"] = df["ambient_temp_c"].interpolate(method="time")
+        
+    except Exception as e:
+        print(f"Warning: Failed to fetch ambient temperature data: {e}")
+        df["ambient_temp_c"] = np.nan
+        
+    return df
+
+
 def build(data_dir, out_dir, start_year=2011, resample="1min", seed=0, clear_cache=False):
     out_dir = Path(out_dir)
     cache_dir = out_dir / "cache"
@@ -130,6 +182,9 @@ def build(data_dir, out_dir, start_year=2011, resample="1min", seed=0, clear_cac
 
     minute = pd.concat(minute_frames).sort_index()
     minute = minute[~minute.index.duplicated(keep="first")]
+
+    # Attach ambient temps via API
+    minute = fetch_ambient_temperature(minute)
 
     save_table(minute, out_dir / "minutely")
 

@@ -27,7 +27,7 @@ FAN_TOTAL_A = N_FANS * FAN_FLA_EACH_A  # 11.2 A total
 COMPRESSORS = {
     "5hp": {"label": "5 hp", "rla_a": 12.8, "tons": 4.0},
     "10hp": {"label": "10 hp", "rla_a": 21.2, "tons": 8.0},
-    "20hp": {"label": "20 hp", "rla_a": 37.8, "tons": 18.0},
+    "20hp": {"label": "20hp", "rla_a": 37.8, "tons": 18.0},
 }
 NOMINAL_TONS = sum(c["tons"] for c in COMPRESSORS.values())  # 30 tons
 
@@ -52,6 +52,11 @@ def derive_features(df):
     out["switcher_a"] = df["switcher_a"]
     out["chiller_a"] = df["chiller_a"]
     out["terminal_mv"] = df["terminal_mv"].clip(lower=0.0)
+    
+    # Pass through water temperature if present
+    if "water_temp_c" in df:
+        out["water_temp_c"] = df["water_temp_c"]
+        
     out["chiller_kw"] = chiller_power_kw(out["chiller_a"])
     out["analyzer_kw"] = out["analyzer_a"] ** 2 * R_ANALYZER_OHM / 1000.0
     out["switcher_kw"] = out["switcher_a"] ** 2 * R_SWITCHER_OHM / 1000.0
