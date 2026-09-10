@@ -6,7 +6,6 @@
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
-from scipy.stats import gaussian_kde
 
 V_LL = 480.0                 # 3-phase line-to-line voltage at the disconnect
 POWER_FACTOR = 0.85          # assumed motor power factor (cancels in on/off comparisons)
@@ -19,10 +18,11 @@ KW_PER_TON = 3.517           # kW of cooling per ton of refrigeration
 SHORT_CYCLE_THRESHOLD_MIN = 10.0  # short cycle defined as < 10 minutes run time
 BUFFER_GALLONS = 400.0            # 350-gal tank + 50-gal main piping
 
-# ---- Nameplate Data ----
+# ---- Empirical Hardware Data ----
+IDLE_BASELINE_A = 1.2          # off/idle control state
 N_FANS = 4
-FAN_FLA_EACH_A = 3.5
-FAN_TOTAL_A = N_FANS * FAN_FLA_EACH_A  # 14.0 A total
+FAN_FLA_EACH_A = 2.8          # empirically measured ~2.8 A per fan
+FAN_TOTAL_A = N_FANS * FAN_FLA_EACH_A  # 11.2 A total
 
 COMPRESSORS = {
     "5hp": {"label": "5 hp", "rla_a": 12.8, "tons": 4.0},
@@ -31,12 +31,12 @@ COMPRESSORS = {
 }
 NOMINAL_TONS = sum(c["tons"] for c in COMPRESSORS.values())  # 30 tons
 
-# Sequential Watlow Controller Stages
+# Sequential Watlow Controller Stages (Updated with empirical operating draw)
 WATLOW_STAGES = [
-    {"stage": 0, "label": "Off", "compressors": "none", "fans": "off", "amps": 0.0, "tons": 0.0},
-    {"stage": 1, "label": "Stage 1 (5hp)", "compressors": "5 hp", "fans": "on", "amps": 26.8, "tons": 4.0},
-    {"stage": 2, "label": "Stage 2 (5+10hp)", "compressors": "5 hp + 10 hp", "fans": "on", "amps": 48.0, "tons": 12.0},
-    {"stage": 3, "label": "Stage 3 (5+10+20hp)", "compressors": "5 hp + 10 hp + 20 hp", "fans": "on", "amps": 85.8, "tons": 30.0},
+    {"stage": 0, "label": "Off / Control Base", "compressors": "none", "fans": "off", "amps": 1.2, "tons": 0.0},
+    {"stage": 1, "label": "Stage 1 (5hp)", "compressors": "5 hp", "fans": "on (4 fans)", "amps": 25.4, "tons": 4.0},
+    {"stage": 2, "label": "Stage 2 (5+10hp)", "compressors": "5 hp + 10 hp", "fans": "on (4 fans)", "amps": 40.0, "tons": 12.0},
+    {"stage": 3, "label": "Stage 3 (20hp Solo / Full)", "compressors": "20 hp Solo / All", "fans": "on (4 fans)", "amps": 58.2, "tons": 18.0},
 ]
 
 
@@ -63,16 +63,16 @@ def derive_features(df):
 def discover_empirical_stages(chiller_amps_array, min_peak_distance_amps=2.0):
     """
     Histogram-based mode detection using logarithmic density scaling to catch
-    both steady-state stages and short high-current pulses (e.g. 57 A).
+    both steady-state stages and short high-current pulses (e.g. 58–68 A).
     """
     clean_amps = np.asarray(chiller_amps_array, dtype=float)
-    clean_amps = clean_amps[np.isfinite(clean_amps) & (clean_amps > 0.5)]
+    clean_amps = clean_amps[np.isfinite(clean_amps) & (clean_amps > IDLE_BASELINE_A + 1.0)]
 
     if clean_amps.size < 100:
         return []
 
-    # Bin into 0.5 A steps from 0 to 100 A
-    bins = np.arange(0, 100.5, 0.5)
+    # Bin into 0.5 A steps from 0 to 80 A
+    bins = np.arange(0, 80.5, 0.5)
     counts, bin_edges = np.histogram(clean_amps, bins=bins)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
@@ -99,35 +99,45 @@ def discover_empirical_stages(chiller_amps_array, min_peak_distance_amps=2.0):
 
 
 def interpret_amps(amps):
-    """Maps an empirical current peak to physical compressor and fan states."""
-    if amps < 3.0:
-        return "Idle / Off"
-    if 3.0 <= amps < 15.0:
-        n_fans = max(1, min(4, round(amps / FAN_FLA_EACH_A)))
-        return f"Fans only ({n_fans} fan{'s' if n_fans > 1 else ''})"
+    """
+    Maps an empirical current level to physical compressor and fan combinations
+    using measured fan steps (~2.8 A) and empirical stage baselines.
+    """
+    if amps < 2.7:
+        return "Idle / Control Board"
 
-    # Stage 1 (5 hp = 12.8 A + fans)
-    if 15.0 <= amps < 32.0:
-        fan_amps = max(0.0, amps - 12.8)
-        n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
+    # Pure Fan Operation (No Compressors Active)
+    if 2.7 <= amps < 11.5:
+        n_fans = max(1, min(4, round(amps / FAN_FLA_EACH_A)))
+        return f"Fans only ({n_fans} fan{'s' if n_fans > 1 else ''} @ ~{round(n_fans * FAN_FLA_EACH_A, 1)} A)"
+
+    # Stage 1 (5 hp compressor ~14.2 A base + fans)
+    # Peak runtime cluster at ~25.4 A (5 hp + 4 fans)
+    if 11.5 <= amps < 27.5:
+        comp_amps = max(0.0, amps - (N_FANS * FAN_FLA_EACH_A))
+        n_fans = max(0, min(4, round((amps - 14.2) / FAN_FLA_EACH_A)))
         return f"Stage 1 (5 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
 
-    # Stage 2 (5 hp + 10 hp = 34.0 A + fans)
-    if 32.0 <= amps < 50.0:
-        fan_amps = max(0.0, amps - 34.0)
+    # Stage 1 / Stage 2 Transition Region (5 hp + 10 hp ramping)
+    # Dominant peak at ~29.9 A
+    if 27.5 <= amps < 33.0:
+        return "Stage 1 High / Stage 2 Light Load"
+
+    # Stage 2 (5 hp + 10 hp ~28.8 A base + fans)
+    # Steady operating range ~33 A – 45 A
+    if 33.0 <= amps < 46.0:
+        fan_amps = max(0.0, amps - 28.8)
         n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
         return f"Stage 2 (5+10 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
 
-    # Single 20 hp compressor operation (5 hp & 10 hp offline/bypassed)
-    if 50.0 <= amps < 68.0:
-        fan_amps = max(0.0, amps - 37.8)
-        n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
-        return f"20 hp Solo / Stage 3 Active (5hp/10hp offline + {n_fans} fans)"
+    # Heavy Load / Stage 2 Maximum / 20 hp Stage Transition
+    if 46.0 <= amps < 56.0:
+        return "Stage 2 Heavy / High Thermal Head"
 
-    # Full Stage 3 (5 hp + 10 hp + 20 hp = 71.8 A + fans)
-    if 68.0 <= amps < 95.0:
-        fan_amps = max(0.0, amps - 71.8)
-        n_fans = max(0, min(4, round(fan_amps / FAN_FLA_EACH_A)))
-        return f"Full Stage 3 (5+10+20 hp + {n_fans} fan{'s' if n_fans != 1 else ''})"
+    # 20 hp Solo / Short-Cycling Spikes / Stage 3 Peak
+    # Short-duration occurrences up to 68.96 A max
+    if 56.0 <= amps <= 70.0:
+        return "20 hp Solo / High-Head Spike / Short Cycle State"
 
-    return "High load / Over-current"
+    return "Over-current / Transient Spike"
+    
