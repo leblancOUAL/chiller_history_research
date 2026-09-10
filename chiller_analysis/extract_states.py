@@ -4,13 +4,14 @@ import pandas as pd
 import numpy as np
 
 
-def extract_current_plateaus(minutely_path, min_amp_threshold=2.7, delta_threshold=1.5, min_duration_min=1):
+def extract_current_plateaus(minutely_path, min_amp_threshold=2.7, delta_threshold=2.2, min_duration_min=1):
     """
-    Extracts distinct continuous current levels from minute-level data.
-    
+    Extracts distinct continuous current levels from minute-level data using
+    instantaneous point-to-point step changes (|I_t - I_{t-1}| >= delta_threshold).
+
     Parameters:
-    - min_amp_threshold: Cutoff above 1.2 A baseline (1.2 A + 1.5 A hysteresis = 2.7 A).
-    - delta_threshold: Step change in Amps (>= 1.5 A) that signals a shift to a new state.
+    - min_amp_threshold: Cutoff above baseline (e.g. 2.7 A).
+    - delta_threshold: Instantaneous jump in Amps (>= 2.2 A) that signals a contactor event.
     - min_duration_min: Minimum continuous duration (in minutes) to be recorded as a stable state.
     """
     path = Path(minutely_path)
@@ -18,7 +19,6 @@ def extract_current_plateaus(minutely_path, min_amp_threshold=2.7, delta_thresho
         path = path / "minutely.parquet"
         
     if not path.exists():
-        # Fallback to pickle if parquet isn't present
         path = path.with_suffix(".pkl")
         if not path.exists():
             raise FileNotFoundError(f"Could not find minutely data at {minutely_path}")
@@ -41,15 +41,14 @@ def extract_current_plateaus(minutely_path, min_amp_threshold=2.7, delta_thresho
     seg_start_idx = 0
     seg_sum_amps = amps[0]
     seg_count = 1
+    last_step_delta = 0.0  # Initial jump from off/idle
 
     for i in range(1, len(amps)):
-        # Check time continuity (gap > 2 min means chiller dropped to idle/off)
         time_gap_min = (times[i] - times[i - 1]) / np.timedelta64(1, "m")
-        current_mean = seg_sum_amps / seg_count
-        amp_diff = abs(amps[i] - current_mean)
+        instantaneous_delta = amps[i] - amps[i - 1]
 
-        if time_gap_min > 2.0 or amp_diff >= delta_threshold:
-            # End current segment
+        # Trigger state boundary on missing minute (chiller off) or instantaneous contactor switch
+        if time_gap_min > 2.0 or abs(instantaneous_delta) >= delta_threshold:
             duration_min = (times[i - 1] - times[seg_start_idx]) / np.timedelta64(1, "m") + 1.0
             
             if duration_min >= min_duration_min:
@@ -57,20 +56,22 @@ def extract_current_plateaus(minutely_path, min_amp_threshold=2.7, delta_thresho
                     "start_time": times[seg_start_idx],
                     "end_time": times[i - 1],
                     "duration_min": duration_min,
-                    "mean_amps": round(float(current_mean), 2),
+                    "mean_amps": round(float(seg_sum_amps / seg_count), 2),
                     "min_amps": round(float(amps[seg_start_idx:i].min()), 2),
                     "max_amps": round(float(amps[seg_start_idx:i].max()), 2),
+                    "initial_step_delta_a": round(float(last_step_delta), 2),
                 })
             
             # Start new segment
             seg_start_idx = i
             seg_sum_amps = amps[i]
             seg_count = 1
+            last_step_delta = instantaneous_delta
         else:
             seg_sum_amps += amps[i]
             seg_count += 1
 
-    # Close last segment
+    # Close final segment
     duration_min = (times[-1] - times[seg_start_idx]) / np.timedelta64(1, "m") + 1.0
     if duration_min >= min_duration_min:
         events.append({
@@ -80,6 +81,7 @@ def extract_current_plateaus(minutely_path, min_amp_threshold=2.7, delta_thresho
             "mean_amps": round(float(seg_sum_amps / seg_count), 2),
             "min_amps": round(float(amps[seg_start_idx:].min()), 2),
             "max_amps": round(float(amps[seg_start_idx:].max()), 2),
+            "initial_step_delta_a": round(float(last_step_delta), 2),
         })
 
     return pd.DataFrame(events)
@@ -90,7 +92,6 @@ def summarize_distinct_levels(events_df, level_bin_width=2.2):
     if events_df.empty:
         return pd.DataFrame()
         
-    # Bin mean amps into 2.2 A steps
     events_df["amp_bucket"] = (events_df["mean_amps"] // level_bin_width) * level_bin_width
     
     summary = events_df.groupby("amp_bucket").agg(
@@ -110,14 +111,14 @@ def summarize_distinct_levels(events_df, level_bin_width=2.2):
 if __name__ == "__main__":
     out_dir = sys.argv[1] if len(sys.argv) > 1 else "chiller_out"
     
-    events = extract_current_plateaus(out_dir)
+    events = extract_current_plateaus(out_dir, delta_threshold=2.2)
     print(f"\nExtracted {len(events):,} continuous active state plateaus (> 2.7 A).")
     
-    summary = summarize_distinct_levels(events)
+    summary = summarize_distinct_levels(events, level_bin_width=2.2)
     print("\n=== Discovered Distinct Operating Levels (Grouped by ~2.2 A steps) ===")
     print(summary.to_string(index=False))
     
-    # Save output for inspection
     events.to_csv(f"{out_dir}/extracted_state_events.csv", index=False)
     summary.to_csv(f"{out_dir}/extracted_state_summary.csv", index=False)
     print(f"\nDetailed event log saved to: {out_dir}/extracted_state_events.csv")
+    
