@@ -4,10 +4,11 @@ import pandas as pd
 import numpy as np
 
 
-def extract_states_and_transitions(minutely_path, min_amp_threshold=2.7, delta_threshold=2.2):
+def extract_chronological_states(minutely_path, min_amp_threshold=2.7):
     """
-    Extracts continuous operating plateaus and valid step-changes, strictly
-    enforcing time-continuity to avoid artifacts from missing data gaps.
+    Traverses the minute-by-minute data chronologically, using step-change
+    deltas to track the actual physical state (compressors and fans) rather 
+    than relying on absolute amperage buckets.
     """
     path = Path(minutely_path)
     if path.is_dir():
@@ -21,152 +22,162 @@ def extract_states_and_transitions(minutely_path, min_amp_threshold=2.7, delta_t
     print(f"Loading data from {path}...")
     df = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_pickle(path)
     
+    # Calculate time gaps and current deltas
     df["time_gap_min"] = df.index.to_series().diff().dt.total_seconds() / 60.0
     df["amp_delta"] = df["chiller_a"].diff()
     df["prev_chiller_a"] = df["chiller_a"].shift(1)
     
-    continuous = df[df["time_gap_min"] < 1.5].copy()
+    amps = df["chiller_a"].to_numpy()
+    deltas = df["amp_delta"].to_numpy()
+    gaps = df["time_gap_min"].to_numpy()
+    times = df.index.to_numpy()
     
-    startups = continuous[
-        (continuous["prev_chiller_a"] < min_amp_threshold) & 
-        (continuous["chiller_a"] >= min_amp_threshold) &
-        (continuous["amp_delta"] > 0)
-    ].copy()
-    
-    operating_steps = continuous[
-        (continuous["prev_chiller_a"] >= min_amp_threshold) & 
-        (continuous["chiller_a"] >= min_amp_threshold) &
-        (continuous["amp_delta"].abs() >= 1.5)
-    ].copy()
-    
-    active = df[df["chiller_a"] >= min_amp_threshold].copy()
-    amps = active["chiller_a"].to_numpy()
-    times = active.index.to_numpy()
-    time_gaps = active["time_gap_min"].to_numpy()
-    
-    if "ambient_temp_c" in active.columns:
-        ambients = active["ambient_temp_c"].to_numpy()
+    if "ambient_temp_c" in df.columns:
+        ambients = df["ambient_temp_c"].to_numpy()
     else:
-        ambients = np.full(len(active), np.nan)
+        ambients = np.full(len(df), np.nan)
         
     events = []
-    if len(amps) > 0:
-        seg_start_idx = 0
-        seg_sum_amps = amps[0]
-        seg_count = 1
-        seg_sum_ambient = ambients[0] if not np.isnan(ambients[0]) else 0.0
-        seg_ambient_count = 1 if not np.isnan(ambients[0]) else 0
+    
+    # State Machine Variables
+    current_base_state = "Idle"
+    current_fan_offset = 0
+    
+    seg_start_time = times[0]
+    seg_sum_amps = 0.0
+    seg_count = 0
+    seg_sum_ambient = 0.0
+    seg_ambient_count = 0
+    
+    for i in range(1, len(amps)):
+        gap = gaps[i]
+        step = deltas[i]
+        current_amp = amps[i]
         
-        for i in range(1, len(amps)):
-            gap = time_gaps[i]
-            step = amps[i] - amps[i-1]
+        # 1. Check for Telemetry Drops (Desync)
+        if gap > 1.5:
+            current_base_state = "Desynced (Gap)"
+            current_fan_offset = 0
             
-            if gap > 1.5 or abs(step) >= delta_threshold:
-                duration = (times[i-1] - times[seg_start_idx]) / np.timedelta64(1, "m") + 1.0
-                if duration >= 1.0:
+        # 2. Check for State Transitions
+        # We only trigger a new state if the jump is significant (>1.5A) OR we lost sync
+        if abs(step) >= 1.5 or gap > 1.5:
+            
+            # Save the PREVIOUS plateau before we transition
+            if seg_count > 0:
+                duration = (times[i-1] - seg_start_time) / np.timedelta64(1, "m") + 1.0
+                if duration >= 1.0 and current_base_state != "Idle":
                     events.append({
-                        "start_time": times[seg_start_idx],
+                        "start_time": seg_start_time,
                         "end_time": times[i-1],
                         "duration_min": duration,
                         "mean_amps": round(float(seg_sum_amps / seg_count), 2),
                         "mean_ambient_c": round(float(seg_sum_ambient / seg_ambient_count), 2) if seg_ambient_count > 0 else np.nan,
+                        "min_ambient_c": round(float(np.nanmin(ambients[i-seg_count:i])), 2) if seg_ambient_count > 0 else np.nan,
+                        "max_ambient_c": round(float(np.nanmax(ambients[i-seg_count:i])), 2) if seg_ambient_count > 0 else np.nan,
+                        "inferred_compressor": current_base_state,
+                        "inferred_fans": current_fan_offset
                     })
-                
-                seg_start_idx = i
-                seg_sum_amps = amps[i]
-                seg_count = 1
-                seg_sum_ambient = ambients[i] if not np.isnan(ambients[i]) else 0.0
-                seg_ambient_count = 1 if not np.isnan(ambients[i]) else 0
+            
+            # Update the State Machine for the NEW plateau
+            seg_start_time = times[i]
+            seg_sum_amps = current_amp
+            seg_count = 1
+            
+            if not np.isnan(ambients[i]):
+                seg_sum_ambient = ambients[i]
+                seg_ambient_count = 1
             else:
-                seg_sum_amps += amps[i]
-                seg_count += 1
-                if not np.isnan(ambients[i]):
-                    seg_sum_ambient += ambients[i]
-                    seg_ambient_count += 1
+                seg_sum_ambient = 0.0
+                seg_ambient_count = 0
+            
+            # Logic: Startup from Idle (or recovering from desync)
+            if current_amp >= min_amp_threshold and (amps[i-1] < min_amp_threshold or gap > 1.5):
+                # We use the absolute current to anchor the initial state, absorbing heater variance
+                if 8.0 <= current_amp <= 17.5:
+                    current_base_state = "5hp"
+                elif 17.5 < current_amp <= 27.5:
+                    current_base_state = "10hp"
+                elif 27.5 < current_amp <= 42.0:
+                    current_base_state = "5hp+10hp"
+                elif 42.0 < current_amp <= 57.0:
+                    current_base_state = "20hp"
+                elif current_amp > 57.0:
+                    current_base_state = "All Compressors"
+                else:
+                    current_base_state = "Unknown"
+                
+                current_fan_offset = 0 # Reset fan counting on new startup
+                
+            # Logic: Shutting Down to Idle
+            elif current_amp < min_amp_threshold:
+                current_base_state = "Idle"
+                current_fan_offset = 0
+                
+            # Logic: Stepping while already Operating
+            elif current_base_state not in ["Idle", "Desynced (Gap)"] and current_amp >= min_amp_threshold:
+                # Is it a Fan? (~2.8A step)
+                if 2.0 <= step <= 3.8:
+                    current_fan_offset += 1
+                elif -3.8 <= step <= -2.0:
+                    current_fan_offset -= 1
+                # If it's a massive jump (e.g., >8A), another compressor fired while running
+                elif step >= 8.0:
+                    if current_base_state == "5hp" and step > 15.0:
+                        current_base_state = "5hp+10hp"
+                    elif current_base_state == "10hp" and 8.0 <= step <= 15.0:
+                        current_base_state = "5hp+10hp"
+                    else:
+                        current_base_state = "State Shifted (Re-evaluating)"
+                elif step <= -8.0:
+                    current_base_state = "State Shifted (Re-evaluating)"
                     
-        duration = (times[-1] - times[seg_start_idx]) / np.timedelta64(1, "m") + 1.0
-        if duration >= 1.0:
-            events.append({
-                "start_time": times[seg_start_idx],
-                "end_time": times[-1],
-                "duration_min": duration,
-                "mean_amps": round(float(seg_sum_amps / seg_count), 2),
-                "mean_ambient_c": round(float(seg_sum_ambient / seg_ambient_count), 2) if seg_ambient_count > 0 else np.nan,
-            })
+        # 3. Accumulate data if stable
+        else:
+            seg_sum_amps += current_amp
+            seg_count += 1
+            if not np.isnan(ambients[i]):
+                seg_sum_ambient += ambients[i]
+                seg_ambient_count += 1
 
-    return pd.DataFrame(events), startups, operating_steps
+    return pd.DataFrame(events)
 
 
-def summarize_distinct_levels(events_df, level_bin_width=2.2):
+def summarize_inferred_states(events_df):
     if events_df.empty:
         return pd.DataFrame()
-        
-    events_df["amp_bucket"] = (events_df["mean_amps"] // level_bin_width) * level_bin_width
     
-    summary = events_df.groupby("amp_bucket").agg(
+    # Combine compressor state and fan offset for the final label
+    events_df["final_state"] = events_df["inferred_compressor"] + " (+" + events_df["inferred_fans"].astype(str) + " fan toggles)"
+    
+    summary = events_df.groupby("final_state").agg(
         total_occurrences=("duration_min", "count"),
         total_runtime_hours=("duration_min", lambda x: round(x.sum() / 60.0, 2)),
         avg_amps=("mean_amps", "mean"),
-        avg_ambient_c=("mean_ambient_c", "mean")
+        amp_std_dev=("mean_amps", "std"), # Shows how wide the variance is (heaters/weather)
+        avg_ambient_c=("mean_ambient_c", "mean"),
+        min_ambient_c=("min_ambient_c", "min"),
+        max_ambient_c=("max_ambient_c", "max")
     ).reset_index()
 
-    def label_state(row):
-        amps = row["avg_amps"]
-        amb = row["avg_ambient_c"]
-        heater_flag = " (+ Offline Heaters)" if amb < 10.0 else ""
-        
-        if amps < 8.0:
-            return f"Idle / Fans Only{heater_flag}"
-        elif 8.0 <= amps < 18.0:
-            return f"5hp Compressor + 0-2 Fans{heater_flag}"
-        elif 18.0 <= amps < 28.0:
-            return f"10hp Compressor + 0-2 Fans{heater_flag}"
-        elif 28.0 <= amps < 42.0:
-            return f"5hp + 10hp Compressors + 0-4 Fans{heater_flag}"
-        elif 42.0 <= amps < 50.0:
-            return f"Ambiguous: Heavy 5hp+10hp OR Light 20hp Solo{heater_flag}"
-        elif 50.0 <= amps < 57.0:
-            return f"20hp Compressor + Fans (Observed Anchor){heater_flag}"
-        else:
-            return f"All Compressors (Stage 3 Peak){heater_flag}"
-
-    summary["heuristic_label"] = summary.apply(label_state, axis=1)
+    summary["avg_amps"] = summary["avg_amps"].round(1)
+    summary["amp_std_dev"] = summary["amp_std_dev"].round(2)
     summary["avg_ambient_c"] = summary["avg_ambient_c"].round(1)
+    
     summary = summary.sort_values(by="total_runtime_hours", ascending=False)
-    return summary
-
-# [analyze_startup_jumps and analyze_operating_steps remain exactly the same]
-def analyze_startup_jumps(startups_df):
-    if startups_df.empty:
-        return pd.DataFrame()
-    startups_df["startup_bucket"] = (startups_df["amp_delta"] // 1.0) * 1.0
-    summary = startups_df.groupby("startup_bucket").agg(
-        occurrences=("amp_delta", "count"),
-        avg_jump=("amp_delta", "mean"),
-        avg_ambient_c=("ambient_temp_c", "mean")
-    ).reset_index()
-    summary["avg_ambient_c"] = summary["avg_ambient_c"].round(1)
-    summary = summary[summary["occurrences"] > 200].sort_values("occurrences", ascending=False)
-    return summary
-
-def analyze_operating_steps(steps_df):
-    if steps_df.empty:
-        return pd.DataFrame()
-    steps_df["step_bucket"] = (steps_df["amp_delta"] // 0.5) * 0.5
-    summary = steps_df.groupby("step_bucket").agg(
-        occurrences=("amp_delta", "count"),
-        avg_step=("amp_delta", "mean"),
-        avg_ambient_c=("ambient_temp_c", "mean")
-    ).reset_index()
-    summary["avg_ambient_c"] = summary["avg_ambient_c"].round(1)
-    summary = summary[summary["occurrences"] > 1000].sort_values("occurrences", ascending=False)
     return summary
 
 
 if __name__ == "__main__":
     out_dir = sys.argv[1] if len(sys.argv) > 1 else "chiller_out"
-    events, startups, operating_steps = extract_states_and_transitions(out_dir, delta_threshold=2.2)
-    levels = summarize_distinct_levels(events, level_bin_width=2.2)
-    print("\n=== Discovered Distinct Operating Levels ===")
-    print(levels.to_string(index=False))
+    
+    events = extract_chronological_states(out_dir)
+    print(f"\nExtracted {len(events):,} chronologically tracked active plateaus.")
+    
+    summary = summarize_inferred_states(events)
+    print("\n=== Chronological State Machine Summary ===")
+    print("Buckets are built by tracking chronological transitions, absorbing heater/weather variance.")
+    print(summary.to_string(index=False))
+    
+    events.to_csv(f"{out_dir}/extracted_state_events.csv", index=False)
     
